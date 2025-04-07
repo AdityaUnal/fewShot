@@ -1,12 +1,29 @@
+     import os
+os.environ["RAGAS_DO_NOT_TRACK"] = "true"
+
+
 import pandas as pd
-from ragas import SingleTurnSample
+from ragas import EvaluationDataset, SingleTurnSample
+from ragas.validation import validate_required_columns
 from ragas.metrics import Faithfulness,  AnswerRelevancy, context_precision, context_recall
 from ragas.evaluation import evaluate
-from langchain.schema import Document
-from ragas.llms import LangchainLLMWrapper
+from datasets import Dataset
+from ragas.evaluation import LangchainLLMWrapper
+from datasets import load_dataset
+from langchain_community.chat_models import ChatOllama
+from langchain.callbacks.base import BaseCallbackHandler
+from langchain.schema import LLMResult
+from langchain.schema import HumanMessage
 
 
-def RAGA_Evaluator(test_cases,llm,embeddings):
+class LoggingCallbackHandler(BaseCallbackHandler):
+    def on_llm_start(self, serialized, prompts, **kwargs):
+        print(f"\n\n======= LLM PROMPT =======\n{prompts[0]}\n")
+    
+    def on_llm_end(self, response: LLMResult, **kwargs):
+        print(f"\n======= LLM RESPONSE =======\n{response.generations[0][0].text}\n")
+
+def RAGA_Evaluator(test_cases,llm_model,embeddings):
     """
     Evaluates the retrieval chain using LLM-as-a-Judge.
 
@@ -14,41 +31,44 @@ def RAGA_Evaluator(test_cases,llm,embeddings):
     - retrieval_chain: The retrieval + document chain.
     - llm: The LLM used for evaluation.
     - statement_file: File containing query statements.
-    - feature_files: File containing feature vectors and corresponding labels.
+    - feature_files: File containing feature vectors andZ corresponding labels.
 
     Returns:
     - Average LLM evaluation score.
     """
     # evaluator_llm = LangchainLLMWrapper()
+    
     eval_dataset = [
-        SingleTurnSample(  # ✅ Using SingleTurnSample (since Instance is missing)
-            question=case["query"],
-            ground_truths=[case["ground_truth"]],
-            contexts=[case["retrieved_context"]],
-            answer=case["generated_answer"]
+        SingleTurnSample(
+            user_input=case["query"],  # Should be a string
+            reference=case["ground_truth"],  # Should be a string, not a list
+            retrieved_contexts=[case["retrieved_context"]],  # Wrapped in a list as required
+            response=case["generated_answer"]  # Should be a string
         )
         for case in test_cases
     ]
 
-    print(f"\n Total Test Cases: {len(test_cases)}")
-    print("\n Running Evaluation...\n")
+    eval_dataset = EvaluationDataset(samples = eval_dataset)
 
-    print(f"Using LLM:s {llm}")
 
-    results = evaluate(
-            eval_dataset,
+    # print((eval_dataset))
+    # # eval_dataset = EvaluationDataset(samples=samples)
+    # print(f"\n Total Test Cases: {len(test_cases)}")
+    # print("\n Running Evaluation...\n")
+    # metrics = [context_precision, context_recall]
+    # # metrics = [Faithfulness,context_precision, context_recall]
+    # # print("RAGAS_DO_NOT_TRACK =", os.environ.get("RAGAS_DO_NOT_TRACK"))
 
-            metrics=[
-                
-                Faithfulness(llm=llm),  # ✅ Use Hugging Face LLM
-                AnswerRelevancy(llm=llm,embeddings=embeddings),  # ✅ Use Hugging Face LLM
-                context_precision,  # No LLM needed
-                context_recall  # No LLM needed
-            ]
-        )
+    # print(validate_required_columns(eval_dataset, metrics))
+    dataset = load_dataset("explodinggradients/amnesty_qa", "english_v3", trust_remote_code=True)
+    amnesty_subset = dataset["eval"].select(range(2))
+    amnesty_subset.to_pandas()
+    langchain_llm = ChatOllama(base_url="http://localhost:11434",model=llm_model,callbacks=[LoggingCallbackHandler()],timeout=1000)
+    # langchain_embeddings = OllamaEmbeddings(model="llama3")
 
-    print("\n🔹 Evaluation Results:")
-    for metric, score in results.items():
-        print(f"   {metric}: {score:.4f}")
+    # print(f"Using LLM:s {llm}")
+    result = evaluate(amnesty_subset,
+                  metrics=[
+                      Faithfulness(),AnswerRelevancy,context_precision, context_recall], llm=langchain_llm,embeddings=embeddings)
 
-    return results
+    return result
